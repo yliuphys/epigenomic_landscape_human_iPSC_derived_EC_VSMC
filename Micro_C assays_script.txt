@@ -1,0 +1,321 @@
+#####################Juicer pipeline for .hic file##############################
+
+#!/bin/bash
+#SBATCH --job-name=juicer_hg38
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=37
+#SBATCH --mem=50gb
+#SBATCH --time=60:00:00
+#SBATCH --account=account_name
+#SBATCH --partition=standard
+#SBATCH --mail-user=user_email
+
+#download the reference fasta file from https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/, hg38.chrom.sizes from https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/
+#index the fastq file with bwa index
+#put the fasta and index file in ${juiceDir}/references/hg38/hg38.fa. put the file of hg38.chrom.sizes to ${juicerDir} and change name to chrom.sizes. If follow this file structure, simply use -z hg38
+#make sure clean the data with trim-galore, copy the two trimmed files _val_1/2.fq.gz to the juicer/fastq folder
+#make sure unzip the files, change the name to ..._R1.fastq and ..._R2.fastq
+#if same sample has been run multiple times, simply put the fastq file in the /fastq folder and make sure have same name for R1 and R2
+#make sure to delete split folder before run
+
+cd /xdisk/mliang1/yongliu/juicer_hg38_2/
+module load bwa/0.7.17
+./scripts/juicer.sh -D /xdisk/mliang1/yongliu/juicer_hg38_2 -t 36 -p hg38 -z /xdisk/mliang1/yongliu/juicer_hg38_2/references/hg38/hg38.fa
+
+
+#######################Dovetail pipeline for .mcool and loops call with mustache##################################
+
+####step 1: trim_glore 
+
+
+#!/bin/bash
+#SBATCH --job-name=trimglore_multithreads
+#SBATCH --ntasks=1
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task=10
+#SBATCH --mem=50gb
+#SBATCH --time=12:00:00
+#SBATCH --partition=standard
+#SBATCH --account=account_name
+#SBATCH --mail-user=user_email
+
+# this script is to run trimgore with multithreads
+# make sure in the folder there are 2 files, one ..._1.fq.gz and one ...__2.fq.gz in the folder
+
+
+#run trim_glore to reads clean up
+module load trimgalore
+module load pigz  #paralle gzip, without pigz, the gzip will slow down multi-core process so much that it is not worth for mutithread
+#trim_galore --paired --illumina --fastqc --cores 4 iPSC039bVSMC7MC_CKDL220017923-1A_H3GC2DSX5_L3_1.fq.gz iPSC039bVSMC7MC_CKDL220017923-1A_H3GC2DSX5_L3_2.fq.gz #4 cores is a sweet spot
+
+trim_galore --paired --illumina --fastqc --cores 4 "$1" "$2" #input the file names from command line
+
+#if have multiple sequencing file from same sample, run trim_galore for more times with each time per pair
+#trim_galore --paired --illumina --fastqc --cores 4 iEC3MC_CKDL210023227-1a_HYG7LDSX2_L2_1.fq.gz iEC3MC_CKDL210023227-1a_HYG7LDSX2_L2_2.fq.gz
+
+#please double check and make sure, after reads clean by trimgalore, the _2 file exactely match with _1 file stem name. If not, change it to match.
+
+
+
+####step 2: bwa alignment
+
+#!/bin/bash
+#SBATCH --job-name=bwa_hg38
+#SBATCH --ntasks=1
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task=37    
+#SBATCH --mem=50gb                    
+#SBATCH --time=50:00:00   
+#SBATCH --partition=standard
+#SBATCH --account=account_name
+#SBATCH --mail-user=user_email   
+
+#this is to run bwa for micro-c dat with hg38. This is to create bam files from fastq.gz
+
+#https://micro-c.readthedocs.io/en/latest/fastq_to_bam.html
+
+module load bwa
+
+bwa mem -5SP -T0 -t36 /home/u27/yongliu/dovetail_MC_pipeline/references_hg38/hg38.fa *_val_1.fq  *_val_2.fq -o ???_aligned.sam
+
+#if have multiple fastq file from same library, use zcat to combine fastq file together, for example
+
+#bwa mem -5SP -T0 -t36 /xdisk/mliang1/yongliu/dovetail_MC_pipeline/references_hg38/hg38.fa <(zcat iEC5MC_CKDL230011953-1A_H3TJWDSX7_L2_1.fq.gz iEC5MC_CKDL230011953-1A_H3TJWDSX7_L3_1.fq.gz iEC5MC_CKDL230011953-1A_H3TJWDSX7_L4_1.fq.gz iEC5MC_CKDL230011953-1A_H5NHYDSX7_L2_1.fq.gz) <(zcat iEC5MC_CKDL230011953-1A_H3TJWDSX7_L2_2.fq.gz iEC5MC_CKDL230011953-1A_H3TJWDSX7_L3_2.fq.gz iEC5MC_CKDL230011953-1A_H3TJWDSX7_L4_2.fq.gz iEC5MC_CKDL230011953-1A_H5NHYDSX7_L2_2.fq.gz) -o iEC5MC_aligned.sam
+
+#mind you do not need use zcat if you only have one _1.fq.gz and one _2.fq.gz
+
+
+####step 3: pairtools parse
+
+#!/bin/bash
+#SBATCH --job-name=pairtools_parse_hg38
+#SBATCH --ntasks=1
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task=8             
+#SBATCH --mem=50gb                    
+#SBATCH --time=50:00:00   
+#SBATCH --partition=standard
+#SBATCH --account=account_name
+#SBATCH --mail-user=user_email   
+
+# this is to run parse module of the pairtools for micro-c dat with hg38a.
+
+#https://micro-c.readthedocs.io/en/latest/fastq_to_bam.html
+
+module load python/3.8/3.8.12
+
+pairtools parse --min-mapq 40 --walks-policy 5unique --max-inter-align-gap 30 --nproc-in 8 --nproc-out 8 --chroms-path /home/u27/yongliu/dovetail_MC_pipeline/references_hg38/hg38.chrom.sizes rs771_1_aligned.sam>rs771_1_parsed.pairsam
+
+
+####step 4: pairtools sort
+#!/bin/bash
+#SBATCH --job-name=pairtools_sort_hg38
+#SBATCH --ntasks=1
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task=17            
+#SBATCH --mem=50gb                    
+#SBATCH --time=50:00:00   
+#SBATCH --partition=standard
+#SBATCH --account=account_name
+#SBATCH --mail-user=user_email   
+
+# this is to run parse module of the pairtools for micro-c dat with hg38a. To sort the pairsam file
+#https://micro-c.readthedocs.io/en/latest/fastq_to_bam.html
+#make sure to creat a tem folder that is large enough (x3 of the fastq.gz file ). make sure to use the absolute path
+
+module load python/3.8/3.8.12
+
+mkdir temp
+
+pairtools sort --nproc 16 --tmpdir=/xdisk/mliang1/yongliu/capture_micro_c_Manoj_rs771_040824/usftp21.novogene.com/01.RawData/huiEV771CMC_1/dovetail_pipeline/temp/ rs771_1_parsed.pairsam > rs771_1_sorted.pairsam
+
+
+####step 5: pairtools dedup
+
+#!/bin/bash
+#SBATCH --job-name=pairtools_dedup_hg38
+#SBATCH --ntasks=1
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task=17            
+#SBATCH --mem=50gb                    
+#SBATCH --time=50:00:00   
+#SBATCH --partition=standard
+#SBATCH --account=account_name
+#SBATCH --mail-user=user_email   
+
+# this is to run parse module of the pairtools for micro-c data with hg38a. This is to remove PCR duplicates
+#https://micro-c.readthedocs.io/en/latest/fastq_to_bam.html
+
+module load python/3.8/3.8.12
+
+pairtools dedup --nproc-in 8 --nproc-out 8 --mark-dups --output-stats rs771_1_dedup_stats.txt --output rs771_1_dedup.pairsam rs771_1_sorted.pairsam
+
+
+####step 6: pairtools split for unsorted bam
+
+
+#!/bin/bash
+#SBATCH --job-name=pairtools_dedup_hg38
+#SBATCH --ntasks=1
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task=17            
+#SBATCH --mem=50gb                    
+#SBATCH --time=50:00:00   
+#SBATCH --partition=standard
+#SBATCH --account=account_name
+#SBATCH --mail-user=user_email   
+
+# this is to run parse module of the pairtools for micro-c dat with hg38a. This is to generate .pairs and bam file
+#https://micro-c.readthedocs.io/en/latest/fastq_to_bam.html
+
+module load python/3.8/3.8.12
+
+module load samtools
+
+pairtools split --nproc-in 8 --nproc-out 8 --output-pairs rs771_1_mapped.pairs --output-sam rs771_1_unsorted.bam rs771_1_dedup.pairsam
+
+
+####step 7:samtools fort and index bam
+
+#!/bin/bash
+#SBATCH --job-name=pairtools_finalbam_hg38
+#SBATCH --ntasks=1
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task=17            
+#SBATCH --mem=50gb                    
+#SBATCH --time=50:00:00   
+#SBATCH --partition=standard
+#SBATCH --account=account_name
+#SBATCH --mail-user=user_email   
+
+# this is to run samtools to sort and index bam filrs  for micro-c dat with hg38.
+#https://micro-c.readthedocs.io/en/latest/fastq_to_bam.html
+
+module load samtools
+
+samtools sort -@16 -o rs771_1_mapped.PT.bam rs771_1_unsorted.bam
+
+samtools index rs771_1_mapped.PT.bam 
+
+
+
+####step 8: get QC report
+
+#!/bin/bash
+#SBATCH --job-name=get_QC_report_hg38
+#SBATCH --ntasks=1
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task=1            
+#SBATCH --mem=50gb                    
+#SBATCH --time=01:00:00   
+#SBATCH --partition=standard
+#SBATCH --account=account_name
+#SBATCH --mail-user=user_email   
+
+# this is to get QC report from provided get_qc.py file
+#https://micro-c.readthedocs.io/en/latest/fastq_to_bam.html
+
+module load python/3.8/3.8.12
+
+python3 ./get_qc.py -p rs771_1_dedup_stats.txt > rs771_1_dovatail_pipeline_report.txt
+
+
+
+####step 9:get hic file with juicer tool. hic file can also get with juicer pipeline
+#!/bin/bash
+#SBATCH --job-name=juicerforhic
+#SBATCH --ntasks=1
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task=17             
+#SBATCH --mem=50gb                    
+#SBATCH --time=50:00:00   
+#SBATCH --partition=standard
+#SBATCH --account=account_name
+#SBATCH --mail-user=user_email   
+
+# this is to get hic file with juicer tool, mind the juice_tools 1.22 works but higher version of juicer not work! 
+
+#https://micro-c.readthedocs.io/en/latest/fastq_to_bam.html
+
+
+java -Xmx48000m  -Djava.awt.headless=true -jar /home/u27/yongliu/dovetail_MC_pipeline/juicer_tools_1.22.01.jar pre --threads 16 rs771_1_mapped.pairs rs771_1_contact_map.hic /home/u27/yongliu/dovetail_MC_pipeline/references_hg38/hg38.chrom.sizes
+
+
+####step 10:generate .cool file
+#!/bin/bash
+#SBATCH --job-name=bgzip_pairix_coolercloadpairix
+#SBATCH --ntasks=1
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task=17            
+#SBATCH --mem=50gb                    
+#SBATCH --time=50:00:00   
+#SBATCH --partition=standard
+#SBATCH --account=account_name
+#SBATCH --mail-user=user_email   
+
+# this is to get cool contact matrix
+#https://micro-c.readthedocs.io/en/latest/fastq_to_bam.html
+
+module load samtools
+
+bgzip rs771_1_mapped.pairs
+
+module load hdf5
+
+/home/u27/yongliu/dovetail_MC_pipeline/pairix/bin/pairix rs771_1_mapped.pairs.gz
+
+module load python/3.8/3.8.12
+
+cooler cload pairix -p 16 /home/u27/yongliu/dovetail_MC_pipeline/references_hg38/hg38.chrom.sizes:1000 rs771_1_mapped.pairs.gz rs771_1_matrix_1kb.cool 
+
+
+
+####step 11:generate .mcool file
+
+#!/bin/bash
+#SBATCH --job-name=cooler_zoomify
+#SBATCH --ntasks=1
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task=17            
+#SBATCH --mem=50gb                    
+#SBATCH --time=50:00:00   
+#SBATCH --partition=standard
+#SBATCH --account=account_name
+#SBATCH --mail-user=user_email   
+
+# When you wish to visualize the contact matrix, it is highly recommended to generate a multi-resolution .mcool file to allow zooming in and out to inspect regions of interest. 
+
+#https://micro-c.readthedocs.io/en/latest/fastq_to_bam.html
+
+module load python/3.8/3.8.12
+
+cooler zoomify --balance -p 16  rs771_1_matrix_1kb.cool 
+
+
+####step 12: loops call
+
+#!/bin/bash
+#SBATCH --job-name=mustache_loops
+#SBATCH --ntasks=1
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task=17            
+#SBATCH --mem=50gb                    
+#SBATCH --time=50:00:00   
+#SBATCH --partition=standard
+#SBATCH --account=account_name
+#SBATCH --mail-user=user_email   
+
+# this is to call loops with mustache
+#https://micro-c.readthedocs.io/en/latest/fastq_to_bam.html
+
+module load python/3.8/3.8.12
+
+mustache -p 16 -f rs771_1_matrix_1kb.mcool -r 64kb -o rs771_1_64kb_loops.tsv 
+
+mustache -p 16 -f rs771_1_matrix_1kb.mcool -r 32kb -o rs771_1_32kb_loops.tsv
+
+mustache -p 16 -f rs771_1_matrix_1kb.mcool -r 16kb -o rs771_1_16kb_loops.tsv
+
+mustache -p 16 -f rs771_1_matrix_1kb.mcool -r 8kb -o rs771_1_8kb_loops.tsv
+
+mustache -p 16 -f rs771_1_matrix_1kb.mcool -r 4kb -o rs771_1_4kb_loops.tsv
